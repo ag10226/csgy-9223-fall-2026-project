@@ -1,0 +1,11 @@
+{
+    "builder": {
+        "id": "https://example.com/local-builder"
+    },
+    "buildType": "https://example.com/custom-build/v1",
+    "invocation": {
+        "configSource": {
+            "entryPoint": "Dockerfile"
+        }
+    }
+}
