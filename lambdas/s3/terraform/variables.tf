@@ -12,7 +12,7 @@ variable "aws_region" {
 
 variable "kms_key_arn" {
   description = <<-EOT
-    ARN of the team's shared signing key (from Phillip).
+    ARN of the team's shared signing key.
     Leave empty to create a personal test key in your own account.
   EOT
   type        = string
@@ -20,7 +20,7 @@ variable "kms_key_arn" {
 }
 
 variable "enable_s3_trigger" {
-  description = "Trigger the Lambda directly from S3. Set to false if Phillip routes events through EventBridge instead."
+  description = "Trigger the Lambda directly from S3. Set to false if events are routed through EventBridge instead."
   type        = bool
   default     = true
 }

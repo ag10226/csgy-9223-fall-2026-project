@@ -1,8 +1,8 @@
 // Package events turns the JSON that starts the Lambda into a simple list of
 // uploaded objects.
 //
-// Two event shapes are supported, so the code works no matter how Phillip
-// routes events:
+// Two event shapes are supported, so the code works no matter how event
+// routing is set up:
 //   - a direct S3 notification  ({"Records":[{"s3":{...}}]})
 //   - an EventBridge "Object Created" event ({"detail-type":"Object Created",...})
 package events
