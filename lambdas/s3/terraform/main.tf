@@ -137,8 +137,8 @@ resource "aws_lambda_function" "signer" {
   runtime          = "provided.al2023"
   handler          = "bootstrap"
   architectures    = ["arm64"]
-  memory_size      = 256
-  timeout          = 60
+  memory_size      = 1024
+  timeout          = 120
 
   environment {
     variables = {

@@ -1,27 +1,27 @@
-# S3 signer (Group 12, Chris Petersen)
+# S3 signer
 
-AWS Lambda function in Go. When a file is uploaded to the artifacts bucket, it:
+AWS Lambda function in Go. When a file is uploaded to the artifacts bucket, it uses
+cosign's own Go code (the same code the `cosign` CLI runs) to:
 
-1. streams the file and computes its SHA-256 digest
-2. signs the digest with an AWS KMS key (ECC P-256), writing `<key>.sig`
-3. builds a signed SLSA provenance attestation (in-toto + DSSE), writing `<key>.att.json`
+1. sign the file with the team's AWS KMS key, writing `<key>.sigstore.json`
+2. sign a SLSA provenance attestation describing the upload, writing `<key>.att.sigstore.json`
 
-Both outputs go to the signatures bucket and can be checked with cosign.
+Both are standard Sigstore bundles, cosign 3's default format, written to the signatures bucket.
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `main.go` | Lambda entry point: S3 download, KMS signing, S3 upload |
+| `main.go` | Lambda entry point: download from S3, cosign sign-blob and attest-blob, upload bundles |
 | `internal/events/` | Parses S3 notifications and EventBridge S3 events |
-| `internal/signing/` | Digest, signature, in-toto statement, DSSE envelope (stdlib only) |
+| `internal/provenance/` | Builds the in-toto statement (bucket, key, SHA-256, uploader, IP, signer) |
 | `terraform/` | Buckets, IAM role, Lambda, S3 trigger, optional test KMS key |
 | `scripts/` | Build scripts for Windows (`build.ps1`) and Mac/Linux (`build.sh`) |
 
 ## Quick start
 
 ```powershell
-go mod tidy                     # first time only: downloads AWS libraries
+go mod tidy                     # downloads cosign and AWS libraries (a few minutes the first time)
 go test ./...                   # unit tests, no AWS needed
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 cd terraform
@@ -34,14 +34,14 @@ terraform apply                 # creates a personal test key
 
 ```powershell
 aws s3 cp app.exe s3://<artifacts_bucket>/app.exe
-aws s3 cp s3://<signatures_bucket>/app.exe.sig .
-aws s3 cp s3://<signatures_bucket>/app.exe.att.json .
+aws s3 cp s3://<signatures_bucket>/app.exe.sigstore.json .
+aws s3 cp s3://<signatures_bucket>/app.exe.att.sigstore.json .
 
-cosign verify-blob --key awskms:///<kms_key_arn> --signature app.exe.sig `
-  --insecure-ignore-tlog=true --new-bundle-format=false app.exe
+cosign verify-blob --key awskms:///<kms_key_arn> --bundle app.exe.sigstore.json `
+  --insecure-ignore-tlog=true app.exe
 
-cosign verify-blob-attestation --key awskms:///<kms_key_arn> --signature app.exe.att.json `
-  --type slsaprovenance1 --insecure-ignore-tlog=true --new-bundle-format=false app.exe
+cosign verify-blob-attestation --key awskms:///<kms_key_arn> --bundle app.exe.att.sigstore.json `
+  --type slsaprovenance1 --insecure-ignore-tlog=true app.exe
 ```
 
 `--insecure-ignore-tlog` is needed because signatures are not uploaded to the public

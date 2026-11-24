@@ -11,4 +11,5 @@ crash.log
 # Local test files
 *.sig
 *.att.json
+*.sigstore.json
 downloaded/
