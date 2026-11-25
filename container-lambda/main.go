@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
 	ecr "github.com/awslabs/amazon-ecr-credential-helper/ecr-login"
 	"github.com/awslabs/amazon-ecr-credential-helper/ecr-login/api"
 	"github.com/google/go-containerregistry/pkg/authn"
@@ -17,9 +19,32 @@ import (
 	_ "github.com/sigstore/sigstore/pkg/signature/kms/aws"
 )
 
-func handler(_ context.Context, event events.CloudWatchEvent) error {
-	fmt.Println("PRINTING THE EVENT")
-	fmt.Println(event)
+var imageRefTemplate string = "%s.dkr.ecr.%s.amazonaws.com/%s@%s"
+var keyID string = "7f76b72a-1725-4649-9035-2ea02ab2e865"
+
+type ECREventDetail struct {
+	Result         string `json:"result"`
+	RepositoryName string `json:"repository-name"`
+	ImageDigest    string `json:"image-digest"`
+	ActionType     string `json:"action-type"`
+	ImageTag       string `json:"image-tag"`
+}
+
+func handler(ctx context.Context, event events.CloudWatchEvent) error {
+	log.Printf("received ECR event: %v", event)
+	var eventDetail ECREventDetail
+	err := json.Unmarshal(event.Detail, &eventDetail)
+	if err != nil {
+		log.Fatalf("error parsing event: %v", err)
+	}
+
+	imageRef := fmt.Sprintf(imageRefTemplate, event.AccountID, event.Region, eventDetail.RepositoryName, eventDetail.ImageDigest)
+
+	sign(ctx, imageRef, keyID)
+	log.Printf("finished signing image %s", imageRef)
+	attest(ctx, imageRef, keyID)
+	log.Printf("finished attesting image %s", imageRef)
+
 	return nil
 }
 
@@ -74,12 +99,5 @@ func attest(ctx context.Context, imageRef, keyID string) {
 }
 
 func main() {
-	// lambda.Start(handler)
-	ctx := context.Background()
-	sign(ctx,
-		"468204078736.dkr.ecr.ap-southeast-2.amazonaws.com/ag/test-repo@sha256:5099b89d7666cc2186cad769ddc262ddc7c335b33f5fe79f9ffe50a01282b23e",
-		"7f76b72a-1725-4649-9035-2ea02ab2e865")
-	attest(ctx,
-		"468204078736.dkr.ecr.ap-southeast-2.amazonaws.com/ag/test-repo@sha256:5099b89d7666cc2186cad769ddc262ddc7c335b33f5fe79f9ffe50a01282b23e",
-		"7f76b72a-1725-4649-9035-2ea02ab2e865")
+	lambda.Start(handler)
 }

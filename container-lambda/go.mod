@@ -4,11 +4,10 @@ go 1.27.3
 
 require (
 	github.com/aws/aws-lambda-go v1.55.1
-	github.com/aws/aws-sdk-go-v2/service/kms v1.63.0
 	github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.13.0
 	github.com/google/go-containerregistry v0.22.1
 	github.com/sigstore/cosign/v3 v3.1.5
-	github.com/sigstore/sigstore v1.11.4
+	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.11.4
 )
 
 require (
@@ -55,6 +54,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.47.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/kms v1.63.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.14.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.39.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 // indirect
@@ -158,8 +158,8 @@ require (
 	github.com/sigstore/protobuf-specs v0.5.2 // indirect
 	github.com/sigstore/rekor v1.5.4 // indirect
 	github.com/sigstore/rekor-tiles/v2 v2.3.0 // indirect
+	github.com/sigstore/sigstore v1.11.4 // indirect
 	github.com/sigstore/sigstore-go v1.3.0 // indirect
-	github.com/sigstore/sigstore/pkg/signature/kms/aws v1.11.4 // indirect
 	github.com/sigstore/timestamp-authority/v2 v2.1.5 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
@@ -207,7 +207,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gotest.tools/v3 v3.5.2 // indirect
 	k8s.io/api v0.36.2 // indirect
 	k8s.io/apimachinery v0.36.2 // indirect
 	k8s.io/client-go v0.36.2 // indirect
