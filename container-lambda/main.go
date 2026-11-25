@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -20,7 +21,6 @@ import (
 )
 
 var imageRefTemplate string = "%s.dkr.ecr.%s.amazonaws.com/%s@%s"
-var keyID string = "7f76b72a-1725-4649-9035-2ea02ab2e865"
 
 type ECREventDetail struct {
 	Result         string `json:"result"`
@@ -39,6 +39,7 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 	}
 
 	imageRef := fmt.Sprintf(imageRefTemplate, event.AccountID, event.Region, eventDetail.RepositoryName, eventDetail.ImageDigest)
+	keyID := os.Getenv("AWS_KEY_ID")
 
 	sign(ctx, imageRef, keyID)
 	log.Printf("finished signing image %s", imageRef)
