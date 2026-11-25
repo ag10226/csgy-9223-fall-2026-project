@@ -67,7 +67,7 @@ func sign(ctx context.Context, imageRef string, keyID string) {
 			Registry: options.RegistryOptions{
 				Keychain: authn.NewKeychainFromHelper(ecrHelper),
 			},
-			NewBundleFormat: true,
+			NewBundleFormat: false,
 		},
 		[]string{imageRef},
 	)
@@ -87,7 +87,7 @@ func attest(ctx context.Context, imageRef, keyID string) {
 		Keychain:           authn.NewKeychainFromHelper(ecrHelper),
 		PredicatePath:      "./predicate.json",
 		PredicateType:      "custom",
-		NewBundleFormat:    true,
+		NewBundleFormat:    false,
 		RegistryClientOpts: []remote.Option{remote.WithAuthFromKeychain(authn.NewKeychainFromHelper(ecrHelper))},
 		RekorEntryType:     "intoto",
 	}
