@@ -11,6 +11,8 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,8 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-
-	"group12/lambdas/codeartifact/internal/signing"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 const (
@@ -32,7 +33,7 @@ const (
 
 	// provenanceObject is written last for each revision, so its presence
 	// means the revision has been fully signed.
-	provenanceObject = "provenance.sigstore.json"
+	provenanceObject = "provenance" + attestationSuffix
 )
 
 // packageVersionStateChange is the detail of a "CodeArtifact Package Version
@@ -65,6 +66,7 @@ type verifiedAsset struct {
 	Name   string `json:"name"`
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+	Path   string `json:"-"` // local copy in /tmp that cosign signs
 }
 
 // verifiedVersion is a package version ready to be signed.
@@ -90,7 +92,7 @@ type s3API interface {
 type Handler struct {
 	codeArtifact codeArtifactAPI
 	s3           s3API
-	signer       *signing.Signer
+	keyRef       string // cosign key reference: awskms:///<arn> in Lambda, a key file in tests
 	bucket       string
 	prefix       string
 	logger       *slog.Logger
@@ -133,7 +135,15 @@ func (h *Handler) Handle(ctx context.Context, raw json.RawMessage) error {
 		return errors.New("no Lambda context: cannot identify the attesting function")
 	}
 
-	verified, reason, err := h.verify(ctx, logger, detail)
+	// Scratch folder for the downloaded assets. Lambda reuses /tmp between
+	// invocations, so it is always removed.
+	dir, err := os.MkdirTemp("", "codeartifact-signer-")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	verified, reason, err := h.verify(ctx, logger, detail, dir)
 	if err != nil {
 		return err
 	}
@@ -142,7 +152,7 @@ func (h *Handler) Handle(ctx context.Context, raw json.RawMessage) error {
 		return nil
 	}
 
-	prefix, err := h.sign(ctx, detail, verified, lc.InvokedFunctionArn, lc.AwsRequestID)
+	prefix, err := h.sign(ctx, dir, detail, verified, lc.InvokedFunctionArn, lc.AwsRequestID)
 	if err != nil {
 		return err
 	}
@@ -154,17 +164,13 @@ func (h *Handler) Handle(ctx context.Context, raw json.RawMessage) error {
 	return nil
 }
 
-// sign writes a signature bundle for every asset, then the provenance
-// attestation. The attestation goes last because its presence marks the
-// revision as fully signed. It returns the S3 prefix written to.
-func (h *Handler) sign(ctx context.Context, d packageVersionStateChange, v *verifiedVersion, builderID, invocationID string) (string, error) {
+// sign has cosign sign every asset, then attest the provenance statement.
+// The attestation goes last because its presence marks the revision as fully
+// signed. It returns the S3 prefix written to.
+func (h *Handler) sign(ctx context.Context, dir string, d packageVersionStateChange, v *verifiedVersion, builderID, invocationID string) (string, error) {
 	prefix := versionPrefix(h.prefix, d, v.Revision)
 	for _, asset := range v.Assets {
-		digest, err := hex.DecodeString(asset.SHA256)
-		if err != nil {
-			return "", fmt.Errorf("decode digest of asset %s: %w", asset.Name, err)
-		}
-		bundle, err := h.signer.SignBlob(ctx, digest)
+		bundle, err := h.signBlob(ctx, asset.Path)
 		if err != nil {
 			return "", fmt.Errorf("sign asset %s: %w", asset.Name, err)
 		}
@@ -177,9 +183,13 @@ func (h *Handler) sign(ctx context.Context, d packageVersionStateChange, v *veri
 	if err != nil {
 		return "", err
 	}
-	bundle, err := h.signer.SignStatement(ctx, statement)
+	payload, err := protojson.Marshal(statement)
 	if err != nil {
-		return "", fmt.Errorf("sign provenance: %w", err)
+		return "", fmt.Errorf("marshal provenance: %w", err)
+	}
+	bundle, err := h.attestStatement(ctx, dir, payload)
+	if err != nil {
+		return "", fmt.Errorf("attest provenance: %w", err)
 	}
 	if err := h.putOnce(ctx, provenanceKey(prefix), bundle); err != nil {
 		return "", err
@@ -223,13 +233,13 @@ func skipEventReason(d packageVersionStateChange) string {
 	return ""
 }
 
-// verify downloads every asset of the package version and checks it against
-// the hashes CodeArtifact reports. The event is only a trigger: status, origin,
-// and assets are re-read from the CodeArtifact API, since anyone allowed to
-// invoke the function could send it a crafted event.
+// verify downloads every asset of the package version into dir and checks it
+// against the hashes CodeArtifact reports. The event is only a trigger: status,
+// origin, and assets are re-read from the CodeArtifact API, since anyone
+// allowed to invoke the function could send it a crafted event.
 //
 // It returns a non-empty reason when the version should not be signed.
-func (h *Handler) verify(ctx context.Context, logger *slog.Logger, d packageVersionStateChange) (*verifiedVersion, string, error) {
+func (h *Handler) verify(ctx context.Context, logger *slog.Logger, d packageVersionStateChange, dir string) (*verifiedVersion, string, error) {
 	desc, err := h.codeArtifact.DescribePackageVersion(ctx, &codeartifact.DescribePackageVersionInput{
 		Domain:         &d.DomainName,
 		DomainOwner:    &d.DomainOwner,
@@ -285,8 +295,11 @@ func (h *Handler) verify(ctx context.Context, logger *slog.Logger, d packageVers
 	if desc.PackageVersion.PublishedTime != nil {
 		verified.PublishedTime = *desc.PackageVersion.PublishedTime
 	}
-	for _, asset := range assets {
-		va, err := h.fetchAndVerify(ctx, d, revision, asset)
+	for i, asset := range assets {
+		// Files are numbered rather than named after the asset, so no asset
+		// name can point outside dir.
+		dst := filepath.Join(dir, fmt.Sprintf("asset-%d", i))
+		va, err := h.fetchAndVerify(ctx, d, revision, asset, dst)
 		if err != nil {
 			return nil, "", err
 		}
@@ -338,9 +351,10 @@ func (h *Handler) alreadySigned(ctx context.Context, d packageVersionStateChange
 	return false, fmt.Errorf("check s3://%s/%s: %w", h.bucket, key, err)
 }
 
-// fetchAndVerify streams one asset from CodeArtifact, hashing it as it goes,
-// and fails if the bytes don't match the SHA-256 and size CodeArtifact reports.
-func (h *Handler) fetchAndVerify(ctx context.Context, d packageVersionStateChange, revision string, asset catypes.AssetSummary) (verifiedAsset, error) {
+// fetchAndVerify streams one asset from CodeArtifact to dst, hashing it as it
+// goes, and fails if the bytes don't match the SHA-256 and size CodeArtifact
+// reports.
+func (h *Handler) fetchAndVerify(ctx context.Context, d packageVersionStateChange, revision string, asset catypes.AssetSummary, dst string) (verifiedAsset, error) {
 	name := deref(asset.Name)
 	want := asset.Hashes[string(catypes.HashAlgorithmSha256)]
 	if want == "" {
@@ -363,10 +377,18 @@ func (h *Handler) fetchAndVerify(ctx context.Context, d packageVersionStateChang
 	}
 	defer out.Asset.Close()
 
-	hash := sha256.New()
-	size, err := io.Copy(hash, out.Asset)
+	f, err := os.Create(dst)
 	if err != nil {
-		return verifiedAsset{}, fmt.Errorf("download asset %s: %w", name, err)
+		return verifiedAsset{}, fmt.Errorf("create %s: %w", dst, err)
+	}
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(f, hash), out.Asset)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return verifiedAsset{}, fmt.Errorf("download asset %s: %w", name, copyErr)
+	}
+	if closeErr != nil {
+		return verifiedAsset{}, fmt.Errorf("save asset %s: %w", name, closeErr)
 	}
 	got := hex.EncodeToString(hash.Sum(nil))
 	if !strings.EqualFold(got, want) {
@@ -375,15 +397,15 @@ func (h *Handler) fetchAndVerify(ctx context.Context, d packageVersionStateChang
 	if asset.Size != nil && size != *asset.Size {
 		return verifiedAsset{}, fmt.Errorf("integrity check failed for asset %s: CodeArtifact reports %d bytes, downloaded %d", name, *asset.Size, size)
 	}
-	return verifiedAsset{Name: name, Size: size, SHA256: got}, nil
+	return verifiedAsset{Name: name, Size: size, SHA256: got, Path: dst}, nil
 }
 
 // versionPrefix is the S3 key prefix holding one revision's signatures and
 // attestation:
 //
 //	<prefix>/<domain>/<repo>/<format>/<namespace>/<package>/<version>/<revision>/
-//	    assets/<asset>.sigstore.json   signature over each asset
-//	    provenance.sigstore.json        attestation covering all assets
+//	    assets/<asset>.sigstore.json    signature over each asset
+//	    provenance.att.sigstore.json     attestation covering all assets
 //
 // Asset signatures sit in their own folder so no asset name (for example a
 // generic package asset named "provenance") can collide with the attestation.
@@ -403,7 +425,7 @@ func versionPrefix(prefix string, d packageVersionStateChange, revision string) 
 }
 
 func assetSignatureKey(versionPrefix, assetName string) string {
-	return versionPrefix + "/assets/" + url.PathEscape(assetName) + ".sigstore.json"
+	return versionPrefix + "/assets/" + url.PathEscape(assetName) + signatureSuffix
 }
 
 func provenanceKey(versionPrefix string) string {

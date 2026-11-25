@@ -16,8 +16,9 @@ const (
 
 	// buildTypeCodeArtifactPublish says what the attestation records: not a
 	// build, but CodeArtifact publishing these exact bytes as this package
-	// version, checked by this function. Follows the S3 signer's buildType.
-	buildTypeCodeArtifactPublish = "https://github.com/group12/supply-chain-signer/codeartifact@v1"
+	// version, checked by this function. Same pattern as the S3 signer's
+	// buildType: the team repo URL plus this Lambda's folder.
+	buildTypeCodeArtifactPublish = "https://github.com/ag10226/csgy-9223-fall-2026-project/lambdas/codeartifact@v1"
 )
 
 // provenanceStatement describes a verified package version as an in-toto
@@ -81,6 +82,9 @@ func provenanceStatement(d packageVersionStateChange, v *verifiedVersion, builde
 			Name:   asset.Name,
 			Digest: map[string]string{"sha256": asset.SHA256},
 		})
+	}
+	if err := statement.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid in-toto statement: %w", err)
 	}
 	return statement, nil
 }

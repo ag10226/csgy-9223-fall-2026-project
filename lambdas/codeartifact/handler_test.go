@@ -21,9 +21,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
-
-	"group12/lambdas/codeartifact/internal/signing"
-	"group12/lambdas/codeartifact/internal/signing/signingtest"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v3/cmd/cosign/cli/verify"
+	"github.com/sigstore/cosign/v3/pkg/cosign"
 )
 
 // Values from testdata/published-generic.json, captured from the sandbox.
@@ -32,6 +32,32 @@ const (
 	testPrefix      = "codeartifact/group12-dan-sandbox/packages/generic/group12/hello/0.1.1795367349/pSRdC7y1JXc4BEcB_urBQC1gaXQiXk0ouNh31pY-t0E"
 	testFunctionARN = "arn:aws:lambda:us-east-1:111122223333:function:codeartifact-signer"
 )
+
+// A cosign key pair stands in for the KMS key: cosign signs with it through the
+// same code path it uses for awskms:// keys. Generated once for all tests.
+var testKeyRef, testPublicKey string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "codeartifact-signer-test-")
+	if err != nil {
+		panic(err)
+	}
+	keys, err := cosign.GenerateKeyPair(func(bool) ([]byte, error) { return nil, nil })
+	if err != nil {
+		panic(err)
+	}
+	testKeyRef = filepath.Join(dir, "cosign.key")
+	testPublicKey = filepath.Join(dir, "cosign.pub")
+	if err := os.WriteFile(testKeyRef, keys.PrivateBytes, 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(testPublicKey, keys.PublicBytes, 0o600); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 type fakeCodeArtifact struct {
 	status   catypes.PackageVersionStatus
@@ -121,14 +147,10 @@ func (f *fakeS3) PutObject(_ context.Context, in *s3.PutObjectInput, _ ...func(*
 
 func newTestHandler(t *testing.T, ca *fakeCodeArtifact, s3 *fakeS3) *Handler {
 	t.Helper()
-	signer, err := signing.NewSigner(context.Background(), signingtest.NewFakeKMS(t), "alias/test")
-	if err != nil {
-		t.Fatal(err)
-	}
 	return &Handler{
 		codeArtifact: ca,
 		s3:           s3,
-		signer:       signer,
+		keyRef:       testKeyRef,
 		bucket:       "test-bucket",
 		prefix:       "codeartifact",
 		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -167,6 +189,68 @@ func loadDetail(t *testing.T, name string) packageVersionStateChange {
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// writeBundleAndFile saves a bundle and the file it covers for cosign to read.
+func writeBundleAndFile(t *testing.T, bundle, content []byte) (bundlePath, filePath string) {
+	t.Helper()
+	dir := t.TempDir()
+	bundlePath = filepath.Join(dir, "bundle.json")
+	filePath = filepath.Join(dir, "file")
+	if err := os.WriteFile(bundlePath, bundle, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bundlePath, filePath
+}
+
+// cosignVerifyBlob runs the check a consumer runs:
+//
+//	cosign verify-blob --key cosign.pub --bundle <bundle> --insecure-ignore-tlog=true <file>
+func cosignVerifyBlob(t *testing.T, bundle, content []byte) error {
+	t.Helper()
+	bundlePath, filePath := writeBundleAndFile(t, bundle, content)
+	cmd := verify.VerifyBlobCmd{
+		KeyOpts:    options.KeyOpts{KeyRef: testPublicKey, BundlePath: bundlePath, NewBundleFormat: true},
+		IgnoreTlog: true,
+	}
+	return cmd.Exec(context.Background(), filePath)
+}
+
+// cosignVerifyAttestation runs the check a consumer runs:
+//
+//	cosign verify-blob-attestation --key cosign.pub --bundle <bundle> \
+//	  --type slsaprovenance1 --insecure-ignore-tlog=true <file>
+func cosignVerifyAttestation(t *testing.T, bundle, content []byte) error {
+	t.Helper()
+	bundlePath, filePath := writeBundleAndFile(t, bundle, content)
+	cmd := verify.VerifyBlobAttestationCommand{
+		KeyOpts:       options.KeyOpts{KeyRef: testPublicKey, BundlePath: bundlePath, NewBundleFormat: true},
+		IgnoreTlog:    true,
+		PredicateType: "slsaprovenance1",
+		CheckClaims:   true,
+	}
+	return cmd.Exec(context.Background(), filePath)
+}
+
+// attestedStatement returns the in-toto statement inside an attestation bundle.
+func attestedStatement(t *testing.T, bundle []byte) map[string]any {
+	t.Helper()
+	var b struct {
+		DsseEnvelope struct {
+			Payload []byte `json:"payload"`
+		} `json:"dsseEnvelope"`
+	}
+	if err := json.Unmarshal(bundle, &b); err != nil {
+		t.Fatal(err)
+	}
+	var statement map[string]any
+	if err := json.Unmarshal(b.DsseEnvelope.Payload, &statement); err != nil {
+		t.Fatal(err)
+	}
+	return statement
 }
 
 func TestSkipEventReason(t *testing.T) {
@@ -220,36 +304,68 @@ func TestHandleSignsPublishedVersion(t *testing.T) {
 		t.Fatalf("Handle() = %v", err)
 	}
 
+	provenanceKey := testPrefix + "/provenance.att.sigstore.json"
 	wantPuts := []string{
 		testPrefix + "/assets/README.txt.sigstore.json",
 		testPrefix + "/assets/hello.tgz.sigstore.json",
-		testPrefix + "/provenance.sigstore.json", // last: marks the revision as signed
+		provenanceKey, // last: marks the revision as signed
 	}
 	if strings.Join(s.puts, "\n") != strings.Join(wantPuts, "\n") {
 		t.Fatalf("wrote %v, want %v", s.puts, wantPuts)
 	}
 
+	provenance := s.objects[provenanceKey]
 	for name, content := range assets {
-		digest := sha256.Sum256(content)
-		if _, err := signingtest.Verify(s.objects[testPrefix+"/assets/"+name+".sigstore.json"], h.signer.PublicKey(), digest[:]); err != nil {
+		signature := s.objects[testPrefix+"/assets/"+name+".sigstore.json"]
+		if err := cosignVerifyBlob(t, signature, content); err != nil {
 			t.Errorf("signature for %s does not verify: %v", name, err)
 		}
-		result, err := signingtest.Verify(s.objects[testPrefix+"/provenance.sigstore.json"], h.signer.PublicKey(), digest[:])
-		if err != nil {
-			t.Fatalf("provenance does not verify for %s: %v", name, err)
+		if err := cosignVerifyAttestation(t, provenance, content); err != nil {
+			t.Errorf("provenance does not verify for %s: %v", name, err)
 		}
-		if result.Statement.GetPredicateType() != predicateTypeSLSAProvenanceV1 {
-			t.Errorf("predicate type = %q", result.Statement.GetPredicateType())
+
+		tampered := append(bytes.Clone(content), 'x')
+		if err := cosignVerifyBlob(t, signature, tampered); err == nil {
+			t.Errorf("signature for %s verified a tampered copy", name)
 		}
-		predicate := result.Statement.GetPredicate().AsMap()
-		builder := predicate["runDetails"].(map[string]any)["builder"].(map[string]any)["id"]
-		if builder != testFunctionARN {
-			t.Errorf("builder.id = %v, want %s", builder, testFunctionARN)
+		if err := cosignVerifyAttestation(t, provenance, tampered); err == nil {
+			t.Errorf("provenance verified a tampered copy of %s", name)
 		}
-		params := predicate["buildDefinition"].(map[string]any)["externalParameters"].(map[string]any)
-		if params["package"] != "hello" || params["version"] != "0.1.1795367349" || params["revision"] != testRevision {
-			t.Errorf("externalParameters = %v", params)
-		}
+	}
+
+	statement := attestedStatement(t, provenance)
+	if statement["predicateType"] != predicateTypeSLSAProvenanceV1 {
+		t.Errorf("predicate type = %v", statement["predicateType"])
+	}
+	if subjects := statement["subject"].([]any); len(subjects) != len(assets) {
+		t.Errorf("attestation has %d subjects, want %d", len(subjects), len(assets))
+	}
+	predicate := statement["predicate"].(map[string]any)
+	buildDefinition := predicate["buildDefinition"].(map[string]any)
+	if buildDefinition["buildType"] != buildTypeCodeArtifactPublish {
+		t.Errorf("buildType = %v", buildDefinition["buildType"])
+	}
+	builder := predicate["runDetails"].(map[string]any)["builder"].(map[string]any)["id"]
+	if builder != testFunctionARN {
+		t.Errorf("builder.id = %v, want %s", builder, testFunctionARN)
+	}
+	params := buildDefinition["externalParameters"].(map[string]any)
+	if params["package"] != "hello" || params["version"] != "0.1.1795367349" || params["revision"] != testRevision {
+		t.Errorf("externalParameters = %v", params)
+	}
+}
+
+func TestHandleSigningFailureWritesNothing(t *testing.T) {
+	ca := newFakeCodeArtifact(map[string][]byte{"hello.tgz": []byte("hello")})
+	s := newFakeS3()
+	h := newTestHandler(t, ca, s)
+	h.keyRef = filepath.Join(t.TempDir(), "missing.key")
+
+	if err := h.Handle(lambdaContext(), loadEvent(t, "published-generic.json")); err == nil {
+		t.Fatal("Handle() succeeded without a usable key")
+	}
+	if len(s.puts) > 0 {
+		t.Errorf("wrote %v, want nothing when signing fails", s.puts)
 	}
 }
 
@@ -267,7 +383,7 @@ func TestHandleKeepsExistingSignatures(t *testing.T) {
 	if got := string(s.objects[assetKey]); got != "earlier signature" {
 		t.Errorf("existing asset signature was overwritten")
 	}
-	if _, ok := s.objects[testPrefix+"/provenance.sigstore.json"]; !ok {
+	if _, ok := s.objects[testPrefix+"/provenance.att.sigstore.json"]; !ok {
 		t.Errorf("provenance was not written")
 	}
 }
@@ -285,16 +401,20 @@ func TestVerifyPublishedInternal(t *testing.T) {
 	ca := newFakeCodeArtifact(map[string][]byte{"hello.tgz": content})
 	h := newTestHandler(t, ca, newFakeS3())
 
-	verified, reason, err := h.verify(context.Background(), h.logger, loadDetail(t, "published-generic.json"))
+	dir := t.TempDir()
+	verified, reason, err := h.verify(context.Background(), h.logger, loadDetail(t, "published-generic.json"), dir)
 	if err != nil || reason != "" {
 		t.Fatalf("verify() reason=%q err=%v, want success", reason, err)
 	}
 	if verified.Revision != testRevision {
 		t.Errorf("revision = %q, want %q", verified.Revision, testRevision)
 	}
-	want := []verifiedAsset{{Name: "hello.tgz", Size: int64(len(content)), SHA256: sha256Hex(content)}}
-	if len(verified.Assets) != 1 || verified.Assets[0] != want[0] {
-		t.Errorf("assets = %+v, want %+v", verified.Assets, want)
+	want := verifiedAsset{Name: "hello.tgz", Size: int64(len(content)), SHA256: sha256Hex(content), Path: filepath.Join(dir, "asset-0")}
+	if len(verified.Assets) != 1 || verified.Assets[0] != want {
+		t.Fatalf("assets = %+v, want %+v", verified.Assets, want)
+	}
+	if saved, err := os.ReadFile(want.Path); err != nil || !bytes.Equal(saved, content) {
+		t.Errorf("saved copy = %q, %v; want %q", saved, err, content)
 	}
 }
 
@@ -334,7 +454,7 @@ func TestVerifySkips(t *testing.T) {
 			tt.modify(ca, s)
 			h := newTestHandler(t, ca, s)
 
-			verified, reason, err := h.verify(context.Background(), h.logger, loadDetail(t, "published-generic.json"))
+			verified, reason, err := h.verify(context.Background(), h.logger, loadDetail(t, "published-generic.json"), t.TempDir())
 			if err != nil || verified != nil || !strings.Contains(reason, tt.reason) {
 				t.Errorf("verify() = %v, %q, %v; want skip reason containing %q", verified, reason, err, tt.reason)
 			}
@@ -350,7 +470,7 @@ func TestVerifyHashMismatch(t *testing.T) {
 	ca.reported = map[string]string{"hello.tgz": sha256Hex([]byte("original"))}
 	h := newTestHandler(t, ca, newFakeS3())
 
-	_, _, err := h.verify(context.Background(), h.logger, loadDetail(t, "published-generic.json"))
+	_, _, err := h.verify(context.Background(), h.logger, loadDetail(t, "published-generic.json"), t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "integrity check failed") {
 		t.Errorf("verify() err = %v, want integrity check failure", err)
 	}

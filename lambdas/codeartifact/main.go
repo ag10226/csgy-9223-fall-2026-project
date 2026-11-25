@@ -3,8 +3,9 @@
 // State Change" events.
 //
 // For each published version it checks every asset against the hashes
-// CodeArtifact reports, signs each asset and a SLSA provenance attestation
-// covering all of them with a KMS key, and writes the Sigstore bundles to S3.
+// CodeArtifact reports, then uses cosign's own Go code (the same code the
+// cosign CLI runs) to sign each asset and a SLSA provenance attestation
+// covering all of them with a KMS key. The Sigstore bundles go to S3.
 //
 // Configuration (set by Terraform as environment variables):
 //
@@ -21,10 +22,8 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/codeartifact"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-
-	"group12/lambdas/codeartifact/internal/signing"
+	_ "github.com/sigstore/sigstore/pkg/signature/kms/aws" // lets cosign use awskms:// keys
 )
 
 func main() {
@@ -37,16 +36,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	signer, err := signing.NewSigner(ctx, kms.NewFromConfig(cfg), mustEnv(logger, "KMS_KEY_ARN"))
-	if err != nil {
-		logger.Error("load signing key", "error", err)
-		os.Exit(1)
-	}
-
 	h := &Handler{
 		codeArtifact: codeartifact.NewFromConfig(cfg),
 		s3:           s3.NewFromConfig(cfg),
-		signer:       signer,
+		keyRef:       "awskms:///" + mustEnv(logger, "KMS_KEY_ARN"),
 		bucket:       mustEnv(logger, "SIGNATURE_BUCKET"),
 		prefix:       mustEnv(logger, "SIGNATURE_PREFIX"),
 		logger:       logger,

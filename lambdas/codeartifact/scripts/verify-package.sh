@@ -40,7 +40,7 @@ aws codeartifact get-package-version-asset --domain "$domain" --repository "$rep
   --format "$format" "${namespace_args[@]}" --package "$package" --package-version "$version" \
   --asset "$asset" "$asset" >/dev/null
 aws s3 cp --quiet "s3://$bucket/$prefix/assets/$asset.sigstore.json" asset.sigstore.json
-aws s3 cp --quiet "s3://$bucket/$prefix/provenance.sigstore.json" provenance.sigstore.json
+aws s3 cp --quiet "s3://$bucket/$prefix/provenance.att.sigstore.json" provenance.att.sigstore.json
 
 # Consumers verify offline with the public key, which Terraform outputs.
 tf output -raw public_key_pem > cosign.pub
@@ -49,9 +49,9 @@ echo "== Signature"
 cosign verify-blob --key cosign.pub --bundle asset.sigstore.json --insecure-ignore-tlog=true "$asset"
 
 echo "== Provenance attestation"
-cosign verify-blob-attestation --key cosign.pub --bundle provenance.sigstore.json \
+cosign verify-blob-attestation --key cosign.pub --bundle provenance.att.sigstore.json \
   --type slsaprovenance1 --insecure-ignore-tlog=true "$asset"
-jq '.dsseEnvelope.payload | @base64d | fromjson' provenance.sigstore.json
+jq '.dsseEnvelope.payload | @base64d | fromjson' provenance.att.sigstore.json
 
 echo "== Tampered copy (must fail)"
 cp "$asset" "tampered-$asset"
