@@ -1,0 +1,13 @@
+# Build output
+build/
+
+# Terraform working files and state (state can contain sensitive values)
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+
+# Local test files
+*.sigstore.json
+cosign.pub

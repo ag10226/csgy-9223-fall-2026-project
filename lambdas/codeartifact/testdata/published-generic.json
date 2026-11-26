@@ -1,0 +1,34 @@
+{
+  "version": "0",
+  "id": "879f0b8c-4c8c-f17f-7557-7a1cfe2933b4",
+  "detail-type": "CodeArtifact Package Version State Change",
+  "source": "aws.codeartifact",
+  "account": "394198294846",
+  "time": "2026-11-22T17:09:09Z",
+  "region": "us-east-1",
+  "resources": [
+    "arn:aws:codeartifact:us-east-1:394198294846:package/group12-dan-sandbox/packages/generic/group12/hello"
+  ],
+  "detail": {
+    "domainName": "group12-dan-sandbox",
+    "domainOwner": "394198294846",
+    "repositoryName": "packages",
+    "repositoryAdministrator": "394198294846",
+    "packageFormat": "generic",
+    "packageNamespace": "group12",
+    "packageName": "hello",
+    "packageVersion": "0.1.1795367349",
+    "packageVersionState": "Published",
+    "packageVersionRevision": "pSRdC7y1JXc4BEcB/urBQC1gaXQiXk0ouNh31pY+t0E=",
+    "changes": {
+      "assetsAdded": 1,
+      "assetsRemoved": 0,
+      "metadataUpdated": true,
+      "assetsUpdated": 0,
+      "statusChanged": true
+    },
+    "operationType": "Created",
+    "sequenceNumber": 1,
+    "eventDeduplicationId": "aUhD/vUPEHbCFFfxBlmFqJnrIekdidXx1NzNQ+DkEek="
+  }
+}
