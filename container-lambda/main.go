@@ -38,6 +38,10 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 		log.Fatalf("error parsing event: %v", err)
 	}
 
+	if eventDetail.Result != "SUCCESS" || eventDetail.ActionType != "PUSH" {
+		return nil
+	}
+
 	imageRef := fmt.Sprintf(imageRefTemplate, event.AccountID, event.Region, eventDetail.RepositoryName, eventDetail.ImageDigest)
 	keyID := os.Getenv("AWS_KEY_ID")
 
